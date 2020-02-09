@@ -1,0 +1,520 @@
+<html>
+<head>
+    <title>Counterparty Multi-Peer-Multi-Asset (MPMA) Send Tool</title>
+    <link rel="stylesheet" href="css/bootstrap.min.css" integrity="sha384-Vkoo8x4CGsO3+Hhxv8T/Q5PaXtkKtu6ug5TOeNV6gBiFeWPGFN9MuhOf23Q9Ifjh" crossorigin="anonymous">
+</head>
+<body>
+
+<div class="container">
+    <h1>Counterparty Multi-Peer-Multi-Asset (MPMA) Send Tool</h1>
+    <p>This is a tool which takes a private key and a list of addresses, assets, and quantities and handles creating and broadcasting MPMA transactions</p>
+    <div class="alert alert-info">If you use this tool and find it helpful, please consider making a Bitcoin donation at <a href="bitcoin:1JDogZS6tQcSxwfxhv6XKKjcyicYA4Feev">1JDogZS6tQcSxwfxhv6XKKjcyicYA4Feev</a></div>
+    <div class="alert alert-danger" id="error" style="display: none;"></div>
+    <form>
+    <div class="row form-group">
+        <div class="col-3"><label for="privkey">Network</label></div>
+        <div class="col-9">
+            <select class="form-control" name="network" id="network" required>
+                <option value="mainnet">Bitcoin Mainnet</option>
+                <option value="testnet">Bitcoin Testnet</option>
+            </select>
+        </div>
+    </div>
+    <div class="row form-group">
+        <div class="col-3"><label for="privkey">Private Key</label></div>
+        <div class="col-9"><input type="text" class="form-control" name="privkey" id="privkey" required></div>
+    </div>
+    <div class="row form-group">
+        <div class="col-3"><label for="source">Source Address</label></div>
+        <div class="col-9"><input type="text" class="form-control" name="source" id="source" readonly></div>
+    </div>
+    <div class="row form-group">
+        <div class="col-3"><label for="source">Send List</label></div>
+        <div class="col-9"><textarea class="form-control" name="send-list" id="send-list" placeholder="Address, Asset, Quantity" rows="10" required></textarea></div>
+    </div>
+    <button type="submit" class="btn btn-block btn-success">Send</button>
+    <div class="row form-group pt-3">
+        <div class="col-3"><label for="source">Status</label></div>
+        <div class="col-9"><textarea class="form-control" name="status" id="status" placeholder="" rows="10"></textarea></div>
+    </div>
+    </form>
+</div>
+
+
+<script type="text/javascript" src="js/jquery.min.js"></script>
+<script type="text/javascript" src="js/popper.min.js"></script>
+<script type="text/javascript" src="js/bootstrap.min.js"></script>
+<script type="text/javascript" src="js/numeral.min.js"></script>
+<script type="text/javascript" src="js/async.min.js"></script>
+<script type="text/javascript" src="js/crypto-js.js"></script>
+<script type="text/javascript" src="js/jquery.base64.js"></script>
+<script type="text/javascript" src="js/buffer.min.js"></script>
+<script type="text/javascript" src="js/bitcoinjs-lib.min.js"></script>
+<script type="text/javascript" src="js/bitcore-lib.min.js"></script>
+<script type="text/javascript" src="js/bitcore-message.min.js"></script>
+<script type="text/javascript" src="js/util.bitcore.js"></script>
+<script type="text/javascript" src="js/util.generic.js"></script>
+
+<script type="text/javascript">
+// Define default server info
+FW = {};
+FW.WALLET_SERVER_INFO = {
+    mainnet: {
+        host: 'public.coindaddy.io',
+        port: 4001,                 
+        user: 'rpc',                
+        pass: '1234',               
+        ssl: true,
+        api_host: 'xchain.io',
+        api_ssl: true
+    },
+    testnet: {
+        host: 'public.coindaddy.io',
+        port: 14001,                
+        user: 'rpc',                
+        pass: '1234',               
+        ssl: true,
+        api_host: 'testnet.xchain.io',
+        api_ssl: true
+    }
+};
+
+// Function to handle updating the address whenever the private key or network changes
+function updateAddress(){
+    $('#error').hide();
+    $('#source').val('');
+    var privKey = $('#privkey').val(),
+        netName = $('#network').val(),
+        network = bitcore.Networks[netName];
+    try {
+        privkey = new bitcore.PrivateKey.fromWIF(privKey);
+        pubkey  = privkey.toPublicKey();
+        address = pubkey.toAddress(network).toString();
+        $('#source').val(address);
+    } catch (e){
+        if(privKey){
+            $('#error').show();
+            $('#error').html('Invalid Private Key');
+        }
+    }
+}
+
+// Validate address
+function isValidAddress(addr){
+    var net = $('#network').val();
+    // update network (used in CWBitcore)
+    NETWORK = bitcore.Networks[net];
+    if(CWBitcore.isValidAddress(addr))
+        return true;
+    return false;
+}
+
+// Convert array of serialized form values into object with name:value pairs
+function array2Object(arr){
+    var vals   = {};
+    for(var i=0;i<arr.length;i++){
+        var o = arr[i];
+        vals[o.name] = o.value;
+    }
+    return vals;
+}
+
+// Handle sending request to counterparty servers
+function cpRequest(network, data, callback){
+    var net  = (network=='testnet') ? 'testnet' : 'mainnet',
+        info = FW.WALLET_SERVER_INFO[net],
+        url  = ((info.ssl) ? 'https' : 'http') + '://' + info.host + ':' + info.port + '/api/',
+        auth = $.base64.btoa(info.user + ':' + info.pass);
+    // Send request to server, process response
+    $.ajax({
+        type: "POST",
+        url: url,
+        data: JSON.stringify(data),
+        dataType: 'json',
+        crossDomain: false,
+        headers: {
+            'Authorization': 'Basic ' + auth, 
+            'Content-Type': 'application/json; charset=UTF-8'
+        },
+        success: function(data){
+            if(typeof callback === 'function')
+                callback(data);
+        }
+    });
+}
+
+// Handle creating send transaction
+function createSend(network, source, destination, memo, memo_is_hex, asset, quantity, fee, txid, callback){
+    // console.log('createSend=',network, source, destination, memo, memo_is_hex, asset, quantity, fee, callback);
+    var data = {
+       method: "create_send",
+       params: {
+            source: source,
+            destination: destination,
+            asset: asset,
+            quantity: quantity,
+            allow_unconfirmed_inputs: true,
+            encoding: "p2sh"
+        },
+        jsonrpc: "2.0",
+        id: 0
+    };
+    if(memo)
+        data.params.memo = memo;
+    if(memo_is_hex)
+        data.params.memo_is_hex = true;
+    if(fee)
+        data.params.fee = fee;
+    if(txid)
+        data.params.p2sh_pretx_txid = txid;
+    cpRequest(network, data, function(o){
+        if(typeof callback === 'function')
+            callback(o);
+    });
+}
+
+// Handle updating the status window with messages
+function updateStatus(text){
+    var status = $('#status'),
+        value  = status.val();
+    value += text;
+    status.val(value);
+}
+
+// Handle getting a list of raw UTXOs for a given address
+function getUTXOs(network, address, callback){
+    var utxos = [];
+    // Make call to indexd to get list of UTXOs
+    $.getJSON(FW.XCHAIN_API +  '/api/utxos/' + address, function(o){
+        if(o && o.data){
+            o.data.forEach(function(utxo){
+                if(utxo.confirmations>=1)
+                    utxos.push(utxo);
+            });
+        }
+        if(callback)
+            callback(utxos);
+    });
+}
+
+// Handle checking if addresses is bech32
+function isBech32(addr) {
+    try {
+        bitcoinjs.address.fromBech32(addr)
+        return true
+    } catch (e) {
+        return false
+    }
+}
+
+// Handle signing a transaction based on what type of address it is
+function signTransaction(wif, network, source, destination, unsignedTx, callback){
+    var net      = (network=='testnet') ? 'testnet' : 'mainnet', 
+        netName  = (network=='testnet') ? 'testnet' : 'livenet', // bitcore
+        callback = (typeof callback === 'function') ? callback : false,
+        privKey  = wif;
+    // Set the appropriate network and get key
+    NETWORK   = bitcore.Networks[netName];
+    var cwKey = new CWPrivateKey(privKey);
+    // Convert destination to array if not already
+    if(typeof(destination)==='string')
+        destination = [destination];
+    // Callback to processes response from signRawTransaction()
+    var cb = function(e, signedTx){
+        if(e)
+            console.log('error =',e);
+        if(callback)
+            callback(signedTx);
+    }
+    // Check if any of the addresses are bech32
+    var sourceIsBech32 = isBech32(source);
+    var hasDestBech32  = destination.reduce((p, x) => p || isBech32(x), false);
+    var hasAnyBech32   = hasDestBech32 || sourceIsBech32;
+    // Handle signing bech32 addresses
+    if(hasAnyBech32){
+        // Use bitcoinjs implementation
+        var tx      = bitcoinjs.Transaction.fromHex(unsignedTx),
+            netName = (net=='testnet') ? 'testnet' : 'bitcoin', // bitcoinjs
+            network = bitcoinjs.networks[netName],
+            txb     = new bitcoinjs.TransactionBuilder(network),
+            keypair = bitcoinjs.ECPair.fromWIF(cwKey.getWIF(), network);
+        // Callback to modify transaction after we get a list of UTXOs back
+        var utxoCb = function(data){
+            var utxoMap = {};
+            data.forEach(utxo => {
+                utxoMap[utxo.txId] = utxo;
+            });
+            if(sourceIsBech32){
+                var input = bitcoinjs.payments.p2wpkh({ pubkey: keypair.publicKey, network: network });
+            } else {
+                var input = bitcoinjs.payments.p2pkh({ pubkey: keypair.publicKey, network: network });
+            }
+            // Handle adding inputs
+            for(var i=0; i < tx.ins.length; i++){
+                // We get reversed tx hashes somehow after parsing
+                var txhash = tx.ins[i].hash.reverse().toString('hex');
+                var prev = utxoMap[txhash];
+                txb.addInput(tx.ins[i].hash.toString('hex'), prev.vout, null, input.output);
+            }
+            // Handle adding outputs
+            for(var i=0; i < tx.outs.length; i++){
+                var txout = tx.outs[i];
+                txb.addOutput(txout.script, txout.value);
+            }
+            // Loop through the inputs and sign
+            for (var i=0; i < tx.ins.length; i++) {
+                var txhash = tx.ins[i].hash.toString('hex');
+                if(txhash in utxoMap){
+                    var prev = utxoMap[txhash];
+                    var redeemScript = undefined;
+                    /*if (hasDestBech32) {
+                      redeemScript =  // Future support for P2WSH
+                    }*/
+                    // Math.floor is less than ideal in this scenario, we need to get the raw satoshi value in the utxo map
+                    txb.sign(i, keypair, null, null, prev.value, redeemScript);
+                } else {
+                    // Throw error that we couldn't sign tx
+                    console.log("Failed to sign transaction: " + "Incomplete SegWit inputs");
+                    return;
+                }
+            }
+            var signedHex = txb.build().toHex();
+            cb(null, signedHex);
+        }
+        // Get list of utxo
+        getUTXOs(net, source, utxoCb);
+    } else {
+        // Sign using bitcore
+        CWBitcore.signRawTransaction(unsignedTx, cwKey, cb);
+    }
+}
+
+// Handle signing a p2sh transaction
+function signP2SHTransaction(wif, network, unsignedTx, prevTx, callback){
+    var net        = (network=='testnet') ? 'testnet' : 'mainnet', 
+        netName    = (network=='testnet') ? 'testnet' : 'bitcoin', // bitcoinjs-lib
+        network    = bitcoinjs.networks[netName],
+        callback   = (typeof callback === 'function') ? callback : false,
+        privKey    = wif,
+        cwKey      = new CWPrivateKey(privKey),
+        keyPair    = bitcoinjs.ECPair.fromWIF(cwKey.getWIF(), network),
+        dataTx     = bitcoinjs.Transaction.fromHex(unsignedTx), // The unsigned second part of the 2 part P2SH transactions
+        preTx      = bitcoinjs.Transaction.fromHex(prevTx),     // The previous transaction in raw hex in its entirety
+        sigType    = bitcoinjs.Transaction.SIGHASH_ALL;         // This shouldn't be changed unless you REALLY know what you're doing
+    // Loop through all inputs and sign
+    for (let i=0; i < dataTx.ins.length; i++) {
+        var sigHash    = dataTx.hashForSignature(0, bitcoinjs.script.decompile(dataTx.ins[i].script)[0], sigType),
+            sig        = keyPair.sign(sigHash),
+            encodedSig = bitcoinjs.script.signature.encode(sig, sigType),
+            compiled   = bitcoinjs.script.compile([encodedSig]);
+        dataTx.ins[i].script = buffer.Buffer.concat([compiled, dataTx.ins[i].script]);
+    }
+    var signedHex = dataTx.toHex();
+    if(callback)
+        callback(signedHex);
+}
+
+// Broadcast a given transaction
+function broadcastTransaction(network, tx, callback){
+    // Prevent broadcasting any other transaction for 5 seconds
+    // Temporary solution to prevent issue where occasionally duplicate transaction is created and broadcast
+    // Remove this hack fix once we have determined why duplicate transaction is being created
+    var net  = (network=='testnet') ? 'BTCTEST' : 'BTC',
+        host = (network=='testnet') ? 'testnet.xchain.io' : 'xchain.io';
+    // First try to broadcast using the XChain API
+    $.ajax({
+        type: "POST",
+        url: 'https://'+ host +  '/api/send_tx',
+        data: { 
+            tx_hex: tx 
+        },
+        complete: function(o){
+            // console.log('o=',o);
+            // Handle successful broadcast
+            if(o.responseJSON.tx_hash){
+                var txid = o.responseJSON.tx_hash;
+                if(callback)
+                    callback(txid);
+                if(txid)
+                    console.log('Broadcasted transaction hash=',txid);
+            } else {
+                // If the request to XChain API failed, fallback to chain.so API
+                $.ajax({
+                    type: "POST",
+                    url: 'https://chain.so/api/v2/send_tx/' + net,
+                    data: { 
+                        tx_hex: tx 
+                    },
+                    dataType: 'json',
+                    complete: function(o){
+                        // console.log('o=',o);
+                        if(o.responseJSON.data && o.responseJSON.data.txid){
+                            var txid = o.responseJSON.data.txid;
+                            if(callback)
+                                callback(txid);
+                            if(txid)
+                                console.log('Broadcast transaction tx_hash=',txid);
+                        }
+                    }
+                });                
+            }
+        }
+    });
+}
+
+$( document ).ready(function() {
+
+    // Handle updating the address whenever the network or private key changes
+    $('#privkey').change(function(){ updateAddress(); });
+    $('#network').change(function(){ updateAddress(); });
+
+    // Verify list format is good after user edits list
+    $('#send-list').change(function(){
+        $('#error').hide();
+        var lines  = String($(this).val()).split('\n'),
+            errors = [],
+            value  = '',
+            list   = []
+        lines.forEach(function(line, idx){
+            var info     = line.trim().split(','),
+                address  = String(info[0]).trim(),
+                asset    = (info[1]) ? String(info[1]).trim() : '',
+                quantity = (info[2]) ? String(info[2]).trim() : '';
+            // Throw error on missing list data
+            if(address=='' || asset=='' || quantity==''){
+                if(address=='' && asset=='' && quantity==''){
+                    return true;
+                } else {
+                    errors.push('Invalid list format on line ' + (idx+1) + '!');
+                }
+            } else {
+                // Verify address is valid
+                if(!isValidAddress(address))
+                    errors.push('Invalid address on line ' + (idx+1) + '!');
+                // Force base asset name to uppercase
+                var arr = asset.split('.');
+                arr[0] = String(arr[0]).toUpperCase();
+                asset = arr.join('.');
+                // Force quantity to correct format
+                var fmt = (String(quantity).indexOf('.')==-1) ? '0' : '0.00000000';
+                quantity = numeral(quantity).format(fmt);
+            }
+            // Update send list with properly formatted values
+            if(value!='')
+                value += "\n"
+            value += address + ', ' + asset + ', ' + quantity;
+        });
+        // Display any error message
+        if(errors.length){
+            $('#error').show();
+            $('#error').html(errors.join('<br/>'));
+        }
+        $('#send-list').val(value);
+    });
+
+    // Handle form submissions by processing the send
+    $('form').submit(function(e){
+        // Prevent actual form submission
+        e.preventDefault();
+        $('#error').hide();
+        // Get object with form values
+        var vals         = array2Object($(this).serializeArray());
+            sends        = String(vals['send-list']).split("\n"),
+            destinations = [],
+            assets       = [],
+            quantities   = [],
+            is_data      = (vals['memo-type']=='data') ? true : false;
+        if(vals.privkey){
+            try {
+                var cwKey = new CWPrivateKey(vals.privkey),
+                    wif   = cwKey.getWIF();
+            } catch (e){
+                console.log('e=',e);
+                $('#error').show();
+                $('#error').html('Error : Invalid Private Key');
+                return false;
+            }
+        } else {
+            $('#error').show();
+            $('#error').html('Error : Invalid Private Key');
+            return false;
+        }
+        // Convert send lines into arrays to pass with API call
+        sends.forEach(function(send){
+            var [destination, asset, quantity] = String(send).split(',');
+            destination = String(destination).trim();
+            asset       = String(asset).trim();
+            quantity    = String(quantity).trim();
+            if(quantity.indexOf('.')!=-1){
+                quantity = parseInt(numeral(quantity).multiply(100000000).value());
+            } else {
+                quantity = parseInt(quantity);
+            }
+            destinations.push(destination);
+            assets.push(asset);
+            quantities.push(quantity);
+        });
+        vals.destination = destinations;
+        vals.asset       = assets;
+        vals.quantity    = quantities;
+        console.log('vals=',vals);
+        // Generate and sign the transactions and report status of each step
+        updateStatus("Creating pre-send transaction...");
+        createSend(vals.network, vals.source, vals.destination, null, false, vals.asset, vals.quantity, 1000, null, function(o){
+            if(o && o.result){
+                updateStatus("Done\n");
+                updateStatus("Signing pre-send transaction...");
+                console.log('unsigned pretx=',o.result);
+                signTransaction(vals.privkey, vals.network, vals.source, vals.destination, o.result, function(signedTx){
+                    if(signedTx){
+                        console.log('signed pretx=',signedTx);
+                        updateStatus("Done\nBroadcasting pre-send transaction...");
+                        broadcastTransaction(vals.network, signedTx, function(txid){
+                            if(txid){
+                                updateStatus("Done\ntxid:" + txid + "\n");
+                                updateStatus("Creating send transaction...");
+                                createSend(vals.network, vals.source, vals.destination, null, false, vals.asset, vals.quantity, 1000, txid, function(o){
+                                    if(o && o.result){
+                                        console.log('unsigned send=',o.result);
+                                        updateStatus("Done\n");
+                                        updateStatus("Signing send transaction...");
+                                        signP2SHTransaction(vals.privkey, vals.network, o.result, signedTx, function(signedTx){
+                                            if(signedTx){
+                                                console.log('signed send=',signedTx);
+                                                updateStatus("Done\nBroadcasting send transaction...");
+                                                broadcastTransaction(vals.network, signedTx, function(txid){
+                                                    if(txid){
+                                                        updateStatus("Done\ntxid:" + txid + "\n");
+                                                    } else {
+                                                        updateStatus("Failed\n");
+                                                    }
+                                                });
+                                            } else {
+                                                updateStatus("Failed\n");
+                                            }
+                                        });
+                                    } else {
+                                        updateStatus("Failed\n");
+                                    }
+                                });
+                            } else {
+                                updateStatus("Failed\n");
+                            }
+                        });
+                    } else {
+                        updateStatus("Failed\n");
+                    }
+                });
+            } else {
+                updateStatus("Failed\n");
+            }
+        });
+
+
+    });
+
+});    
+
+</script>
+</body>
+</html>
