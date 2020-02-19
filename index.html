@@ -303,7 +303,7 @@ function signP2SHTransaction(wif, network, unsignedTx, prevTx, callback){
         sigType    = bitcoinjs.Transaction.SIGHASH_ALL;         // This shouldn't be changed unless you REALLY know what you're doing
     // Loop through all inputs and sign
     for (let i=0; i < dataTx.ins.length; i++) {
-        var sigHash    = dataTx.hashForSignature(0, bitcoinjs.script.decompile(dataTx.ins[i].script)[0], sigType),
+        var sigHash    = dataTx.hashForSignature(i, bitcoinjs.script.decompile(dataTx.ins[i].script)[0], sigType),
             sig        = keyPair.sign(sigHash),
             encodedSig = bitcoinjs.script.signature.encode(sig, sigType),
             compiled   = bitcoinjs.script.compile([encodedSig]);
