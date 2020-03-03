@@ -30,7 +30,7 @@
     </div>
     <div class="row form-group">
         <div class="col-3"><label for="source">Send List</label></div>
-        <div class="col-9"><textarea class="form-control" name="send-list" id="send-list" placeholder="Address, Asset, Quantity" rows="10" required></textarea></div>
+        <div class="col-9"><textarea class="form-control" name="send-list" id="send-list" placeholder="Address, Asset, Quantity, Memo (Optional)" rows="10" required></textarea></div>
     </div>
     <button type="submit" class="btn btn-block btn-success">Send</button>
     <div class="row form-group pt-3">
@@ -153,18 +153,15 @@ function createSend(network, source, destination, memo, memo_is_hex, asset, quan
             destination: destination,
             asset: asset,
             quantity: quantity,
+            memo: memo,
+            memo_is_hex: memo_is_hex,
+            fee: parseInt(fee),
             allow_unconfirmed_inputs: true,
             encoding: "p2sh"
         },
         jsonrpc: "2.0",
         id: 0
     };
-    if(memo)
-        data.params.memo = memo;
-    if(memo_is_hex)
-        data.params.memo_is_hex = true;
-    if(fee)
-        data.params.fee = fee;
     if(txid)
         data.params.p2sh_pretx_txid = txid;
     cpRequest(network, data, function(o){
@@ -379,7 +376,11 @@ $( document ).ready(function() {
             var info     = line.trim().split(','),
                 address  = String(info[0]).trim(),
                 asset    = (info[1]) ? String(info[1]).trim() : '',
-                quantity = (info[2]) ? String(info[2]).trim() : '';
+                quantity = (info[2]) ? String(info[2]).trim() : '',
+                memo     = (info[3]) ? String(info[3]).trim().replace(/^"|"$/g,'') : '';
+            // Re-assemble any memos which have commas
+            if(memo!='')
+                memo = String(info.slice(3,info.length).join(',')).trim().replace(/^"|"$/g,'');
             // Throw error on missing list data
             if(address=='' || asset=='' || quantity==''){
                 if(address=='' && asset=='' && quantity==''){
@@ -403,6 +404,8 @@ $( document ).ready(function() {
             if(value!='')
                 value += "\n"
             value += address + ', ' + asset + ', ' + quantity;
+            if(memo!='')
+                value += ', "' + memo + '"';
         });
         // Display any error message
         if(errors.length){
@@ -423,7 +426,9 @@ $( document ).ready(function() {
             destinations = [],
             assets       = [],
             quantities   = [],
-            is_data      = (vals['memo-type']=='data') ? true : false;
+            memos        = [],
+            memo_is_hex  = [],
+            isHex        = /^[0-9a-fA-F]+$/;
         if(vals.privkey){
             try {
                 var cwKey = new CWPrivateKey(vals.privkey),
@@ -441,26 +446,34 @@ $( document ).ready(function() {
         }
         // Convert send lines into arrays to pass with API call
         sends.forEach(function(send){
-            var [destination, asset, quantity] = String(send).split(',');
-            destination = String(destination).trim();
-            asset       = String(asset).trim();
-            quantity    = String(quantity).trim();
+            var info     = String(send).trim().split(','),
+                address  = String(info[0]).trim(),
+                asset    = (info[1]) ? String(info[1]).trim() : '',
+                quantity = (info[2]) ? String(info[2]).trim() : '',
+                memo     = (info[3]) ? String(info[3]).trim().replace(/^"|"$/g,'') : '';
+            // Re-assemble any memos which have commas
+            if(memo!='')
+                memo = String(info.slice(3,info.length).join(',')).trim().replace(/^"|"$/g,'');
             if(quantity.indexOf('.')!=-1){
                 quantity = parseInt(numeral(quantity).multiply(100000000).value());
             } else {
                 quantity = parseInt(quantity);
             }
-            destinations.push(destination);
+            destinations.push(address);
             assets.push(asset);
             quantities.push(quantity);
+            memos.push(memo);
+            memo_is_hex.push(isHex.test(memo));
         });
         vals.destination = destinations;
         vals.asset       = assets;
         vals.quantity    = quantities;
+        vals.memo        = memos;
+        vals.memo_is_hex = memo_is_hex;
         console.log('vals=',vals);
         // Generate and sign the transactions and report status of each step
         updateStatus("Creating pre-send transaction...");
-        createSend(vals.network, vals.source, vals.destination, null, false, vals.asset, vals.quantity, 1000, null, function(o){
+        createSend(vals.network, vals.source, vals.destination, vals.memo, vals.memo_is_hex, vals.asset, vals.quantity, 1000, null, function(o){
             if(o && o.result){
                 updateStatus("Done\n");
                 updateStatus("Signing pre-send transaction...");
@@ -473,7 +486,7 @@ $( document ).ready(function() {
                             if(txid){
                                 updateStatus("Done\ntxid:" + txid + "\n");
                                 updateStatus("Creating send transaction...");
-                                createSend(vals.network, vals.source, vals.destination, null, false, vals.asset, vals.quantity, 1000, txid, function(o){
+                                createSend(vals.network, vals.source, vals.destination, vals.memo, vals.memo_is_hex, vals.asset, vals.quantity, 1000, txid, function(o){
                                     if(o && o.result){
                                         console.log('unsigned send=',o.result);
                                         updateStatus("Done\n");
